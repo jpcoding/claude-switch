@@ -1,0 +1,9 @@
+# Never commit profile data or API keys (these live in $HOME, not here — defensive)
+.provider.json
+.claude-*/
+.claude.json
+
+# Editor / OS cruft
+*.swp
+*~
+.DS_Store
