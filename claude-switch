@@ -3,10 +3,10 @@ set -euo pipefail
 
 # ─────────────────────────────────────────────────────────────────────────────
 # claude-switch — Run multiple Claude Code accounts on one machine
-#                 With third-party API provider support.
+#                 With third-party API provider support. Pure bash.
 # ─────────────────────────────────────────────────────────────────────────────
 
-VERSION="2.2.0"
+VERSION="2.3.0"
 CLAUDE_HOME="$HOME/.claude"
 PROFILE_PREFIX="$HOME/.claude-"
 PROFILE_MARKER=".profile-name"
@@ -33,46 +33,14 @@ IC_PERSON="\xe2\x97\x89"  # ◉
 IC_LINK="\xe2\x86\x92"    # →
 IC_API="\xe2\x97\x86"     # ◆
 
-# ── Prereq helpers ───────────────────────────────────────────────────────────
-
-ensure_gum() {
-    if command -v gum >/dev/null 2>&1; then
-        return 0
-    fi
-    echo ""
-    printf "  ${YELLOW}gum${RESET} is required for interactive menus.\n"
-    echo ""
-    if command -v brew >/dev/null 2>&1; then
-        printf "  Installing via Homebrew...\n"
-        brew install gum
-    else
-        printf "  Install it: ${CYAN}brew install gum${RESET}  or  ${CYAN}go install github.com/charmbracelet/gum@latest${RESET}\n"
-        exit 1
-    fi
-}
-
-ensure_python3() {
-    if command -v python3 >/dev/null 2>&1; then
-        return 0
-    fi
-    print_error "python3 not found in PATH."
-    print_dim "Required to read/write profile provider config. Install python3 and re-run."
-    exit 1
-}
-
-# ── Utility Functions ────────────────────────────────────────────────────────
+# ── Print helpers ────────────────────────────────────────────────────────────
 
 print_header() {
     echo ""
-    gum style \
-        --border double \
-        --border-foreground 208 \
-        --padding "1 3" \
-        --margin "0 2" \
-        --align center \
-        "$(gum style --bold --foreground 208 'C L A U D E   S W I T C H')" \
-        "" \
-        "$(gum style --faint "v${VERSION}  ·  multi-account + third-party API support")"
+    printf "  ${BOLD}${YELLOW}╔═══════════════════════════════════════════════╗${RESET}\n"
+    printf "  ${BOLD}${YELLOW}║${RESET}        ${BOLD}C L A U D E   S W I T C H${RESET}              ${BOLD}${YELLOW}║${RESET}\n"
+    printf "  ${BOLD}${YELLOW}║${RESET}   ${DIM}v%-7s · multi-account + 3rd-party API${RESET}  ${BOLD}${YELLOW}║${RESET}\n" "$VERSION"
+    printf "  ${BOLD}${YELLOW}╚═══════════════════════════════════════════════╝${RESET}\n"
     echo ""
 }
 
@@ -81,6 +49,73 @@ print_error()   { printf "  ${RED}${IC_CROSS}${RESET}  %s\n" "$1"; }
 print_warn()    { printf "  ${YELLOW}!${RESET}  %s\n" "$1"; }
 print_info()    { printf "  ${BLUE}${IC_ARROW}${RESET}  %s\n" "$1"; }
 print_dim()     { printf "  ${DIM}   %s${RESET}\n" "$1"; }
+
+# Print a simple section header (replaces gum's bordered callout).
+print_section() {
+    local title="$1" subtitle="${2:-}"
+    echo ""
+    printf "  ${BOLD}${CYAN}── %s ──${RESET}\n" "$title"
+    [ -n "$subtitle" ] && printf "  ${DIM}%s${RESET}\n" "$subtitle"
+    echo ""
+}
+
+# ── Interactive prompts (replaces gum input/confirm/choose) ──────────────────
+# All UI goes to stderr; the answer is returned via the global $INPUT_RESULT
+# so callers can safely use these inside $(…) captures.
+
+# ask_input "Prompt" ["default"] → sets INPUT_RESULT
+ask_input() {
+    local prompt="$1" default="${2:-}"
+    if [ -n "$default" ]; then
+        read -r -p "  $(printf "${CYAN}?${RESET} %s [${DIM}%s${RESET}]: " "$prompt" "$default")" INPUT_RESULT
+        [ -z "$INPUT_RESULT" ] && INPUT_RESULT="$default"
+    else
+        read -r -p "  $(printf "${CYAN}?${RESET} %s: " "$prompt")" INPUT_RESULT
+    fi
+}
+
+# ask_password "Prompt" → sets INPUT_RESULT (input hidden)
+ask_password() {
+    local prompt="$1"
+    read -rs -p "  $(printf "${CYAN}?${RESET} %s: " "$prompt")" INPUT_RESULT
+    echo "" >&2
+}
+
+# ask_confirm "Prompt" ["Y"|"N" default] → exit 0 = yes, 1 = no
+ask_confirm() {
+    local prompt="$1" default="${2:-N}" reply
+    local hint="[y/N]"
+    [ "$default" = "Y" ] && hint="[Y/n]"
+    read -r -p "  $(printf "${CYAN}?${RESET} %s ${DIM}%s${RESET}: " "$prompt" "$hint")" reply
+    [ -z "$reply" ] && reply="$default"
+    [[ "$reply" =~ ^[Yy] ]]
+}
+
+# ask_choose "Prompt" opt1 opt2 ... → sets INPUT_RESULT to chosen option
+ask_choose() {
+    local prompt="$1"; shift
+    local options=("$@")
+    {
+        echo ""
+        printf "  ${BOLD}%s${RESET}\n" "$prompt"
+        local i
+        for i in "${!options[@]}"; do
+            printf "    ${YELLOW}%d)${RESET} %s\n" $((i+1)) "${options[$i]}"
+        done
+        echo ""
+    } >&2
+    local pick
+    while true; do
+        read -r -p "  $(printf "${CYAN}?${RESET} Choose [${DIM}1-%d${RESET}]: " "${#options[@]}")" pick
+        if [[ "$pick" =~ ^[0-9]+$ ]] && [ "$pick" -ge 1 ] && [ "$pick" -le "${#options[@]}" ]; then
+            INPUT_RESULT="${options[$((pick-1))]}"
+            return 0
+        fi
+        printf "    ${RED}Invalid selection.${RESET}\n" >&2
+    done
+}
+
+# ── Utility Functions ────────────────────────────────────────────────────────
 
 validate_profile_name() {
     local name="$1"
@@ -152,55 +187,54 @@ pick_profile() {
     local profiles
     profiles=$(get_all_profiles)
     if [ -z "$profiles" ]; then
-        print_warn "No profiles found. Create one first."
+        print_warn "No profiles found. Create one first." >&2
         return 1
     fi
-    local choice
-    choice=$(echo "$profiles" | gum choose --header "Select a profile to ${action}:" --cursor.foreground 208 --header.foreground 252)
-    if [ -z "$choice" ]; then
-        return 1
-    fi
-    echo "$choice"
+    local options=()
+    while IFS= read -r p; do options+=("$p"); done <<<"$profiles"
+    ask_choose "Select a profile to ${action}:" "${options[@]}"
+    printf '%s' "$INPUT_RESULT"
 }
 
-# ── Provider config helpers ──────────────────────────────────────────────────
+# ── Provider config helpers (pure bash JSON I/O) ─────────────────────────────
+# .provider.json is a flat object with string values that we write ourselves,
+# so a tiny escape/unescape pair is enough. Values must not contain literal
+# control chars; quotes and backslashes are handled.
+
+json_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"   # \ → \\
+    s="${s//\"/\\\"}"   # " → \"
+    printf '%s' "$s"
+}
 
 read_provider_field() {
     local file="$1" field="$2"
-    if [ -f "$file" ]; then
-        # Values passed via env (not string-interpolated) to avoid quote injection.
-        CS_FILE="$file" CS_FIELD="$field" python3 -c "
-import json, os
-with open(os.environ['CS_FILE']) as f:
-    data = json.load(f)
-print(data.get(os.environ['CS_FIELD'], ''))
-" 2>/dev/null || echo ""
-    else
-        echo ""
-    fi
+    [ -f "$file" ] || { echo ""; return; }
+    # Match: "field": "value"[,]   on its own line. Greedy capture handles
+    # embedded \" since the trailing " is the LAST one on the line.
+    local raw
+    raw=$(sed -n "s/^[[:space:]]*\"${field}\"[[:space:]]*:[[:space:]]*\"\\(.*\\)\",\\{0,1\\}[[:space:]]*\$/\\1/p" "$file" | head -1)
+    # Unescape — order matters: \" before \\ (otherwise \\" decodes wrong).
+    raw="${raw//\\\"/\"}"
+    raw="${raw//\\\\/\\}"
+    printf '%s' "$raw"
 }
 
 write_provider_config() {
     local dir="$1" base_url="$2" auth_token="$3" model="$4"
     local haiku="${5:-$model}" sonnet="${6:-$model}" opus="${7:-$model}" subagent="${8:-$model}"
-    # Values passed via env (not string-interpolated) to avoid quote injection.
-    CS_FILE="$dir/$PROVIDER_CONFIG" \
-    CS_BASE_URL="$base_url" CS_AUTH="$auth_token" CS_MODEL="$model" \
-    CS_HAIKU="$haiku" CS_SONNET="$sonnet" CS_OPUS="$opus" CS_SUBAGENT="$subagent" \
-    python3 -c "
-import json, os
-data = {
-    'base_url': os.environ['CS_BASE_URL'],
-    'auth_token': os.environ['CS_AUTH'],
-    'model': os.environ['CS_MODEL'],
-    'haiku_model': os.environ['CS_HAIKU'],
-    'sonnet_model': os.environ['CS_SONNET'],
-    'opus_model': os.environ['CS_OPUS'],
-    'subagent_model': os.environ['CS_SUBAGENT'],
-}
-with open(os.environ['CS_FILE'], 'w') as f:
-    json.dump(data, f, indent=2)
-"
+    {
+        printf '{\n'
+        printf '  "base_url": "%s",\n'      "$(json_escape "$base_url")"
+        printf '  "auth_token": "%s",\n'    "$(json_escape "$auth_token")"
+        printf '  "model": "%s",\n'         "$(json_escape "$model")"
+        printf '  "haiku_model": "%s",\n'   "$(json_escape "$haiku")"
+        printf '  "sonnet_model": "%s",\n'  "$(json_escape "$sonnet")"
+        printf '  "opus_model": "%s",\n'    "$(json_escape "$opus")"
+        printf '  "subagent_model": "%s"\n' "$(json_escape "$subagent")"
+        printf '}\n'
+    } > "$dir/$PROVIDER_CONFIG"
 }
 
 build_env_prefix() {
@@ -224,25 +258,13 @@ build_env_prefix() {
 configure_third_party() {
     local dir="$1" name="$2"
 
-    echo ""
-    gum style \
-        --border rounded \
-        --border-foreground 99 \
-        --padding "1 2" \
-        --margin "0 2" \
-        "$(gum style --bold --foreground 99 '🔌 Third-Party API Configuration')" \
-        "" \
-        "$(gum style --faint 'Configure your API provider (DeepSeek, Volcano Engine, OpenRouter, etc.)')"
-    echo ""
+    print_section "🔌 Third-Party API Configuration" \
+        "Configure your API provider (DeepSeek, Volcano Engine, OpenRouter, etc.)"
 
     # Base URL
     local base_url
-    base_url=$(gum input \
-        --placeholder "e.g. https://api.deepseek.com/anthropic" \
-        --header "API Base URL" \
-        --width 70 \
-        --cursor.foreground 99 \
-        --header.foreground 252)
+    ask_input "API Base URL"
+    base_url="$INPUT_RESULT"
     if [ -z "$base_url" ]; then
         print_error "Base URL is required."
         return 1
@@ -250,13 +272,8 @@ configure_third_party() {
 
     # API Key
     local auth_token
-    auth_token=$(gum input \
-        --placeholder "e.g. sk-xxxx or ark-xxxx" \
-        --header "API Key / Auth Token" \
-        --width 70 \
-        --password \
-        --cursor.foreground 99 \
-        --header.foreground 252)
+    ask_password "API Key / Auth Token"
+    auth_token="$INPUT_RESULT"
     if [ -z "$auth_token" ]; then
         print_error "API key is required."
         return 1
@@ -264,12 +281,8 @@ configure_third_party() {
 
     # Primary model
     local model
-    model=$(gum input \
-        --placeholder "e.g. deepseek-v4-pro, glm-5.1, ark-code-latest" \
-        --header "Primary Model Name" \
-        --width 70 \
-        --cursor.foreground 99 \
-        --header.foreground 252)
+    ask_input "Primary Model Name (e.g. deepseek-v4-pro, glm-5.1, ark-code-latest)"
+    model="$INPUT_RESULT"
     if [ -z "$model" ]; then
         print_error "Model name is required."
         return 1
@@ -279,42 +292,14 @@ configure_third_party() {
     local haiku="$model" sonnet="$model" opus="$model" subagent="$model"
 
     echo ""
-    if gum confirm "Use different models for different tiers (Haiku/Sonnet/Opus)?" --affirmative "Yes, customize" --negative "No, use '$model' for all" --default=false; then
-        echo ""
-        opus=$(gum input \
-            --placeholder "$model" \
-            --value "$model" \
-            --header "Opus model (complex tasks)" \
-            --width 70 \
-            --cursor.foreground 99 \
-            --header.foreground 252)
-        [ -z "$opus" ] && opus="$model"
-
-        sonnet=$(gum input \
-            --placeholder "$model" \
-            --value "$model" \
-            --header "Sonnet model (balanced tasks)" \
-            --width 70 \
-            --cursor.foreground 99 \
-            --header.foreground 252)
-        [ -z "$sonnet" ] && sonnet="$model"
-
-        haiku=$(gum input \
-            --placeholder "$model" \
-            --value "$model" \
-            --header "Haiku model (fast/light tasks)" \
-            --width 70 \
-            --cursor.foreground 99 \
-            --header.foreground 252)
-        [ -z "$haiku" ] && haiku="$model"
-
-        subagent=$(gum input \
-            --placeholder "$haiku" \
-            --value "$haiku" \
-            --header "Subagent model" \
-            --width 70 \
-            --cursor.foreground 99 \
-            --header.foreground 252)
+    if ask_confirm "Use different models for different tiers (Haiku/Sonnet/Opus)?"; then
+        ask_input "Opus model (complex tasks)" "$model";   opus="$INPUT_RESULT"
+        [ -z "$opus" ]    && opus="$model"
+        ask_input "Sonnet model (balanced tasks)" "$model"; sonnet="$INPUT_RESULT"
+        [ -z "$sonnet" ]  && sonnet="$model"
+        ask_input "Haiku model (fast/light tasks)" "$model"; haiku="$INPUT_RESULT"
+        [ -z "$haiku" ]   && haiku="$model"
+        ask_input "Subagent model" "$haiku"; subagent="$INPUT_RESULT"
         [ -z "$subagent" ] && subagent="$haiku"
     fi
 
@@ -345,7 +330,8 @@ configure_third_party() {
 cmd_create() {
     local name="${1:-}"
     if [ -z "$name" ]; then
-        name=$(gum input --placeholder "Profile name (e.g. work, deepseek, hs)" --header "Create a new profile" --cursor.foreground 208 --header.foreground 252)
+        ask_input "Profile name (e.g. work, deepseek, hs)"
+        name="$INPUT_RESULT"
     fi
 
     if [ -z "$name" ]; then
@@ -372,21 +358,10 @@ cmd_create() {
     fi
 
     # Ask about profile type
-    echo ""
-    local profile_type
-    profile_type=$(gum choose \
+    ask_choose "What type of profile?" \
         "Anthropic (OAuth login)" \
-        "Third-party API (DeepSeek, Volcano Engine, OpenRouter, etc.)" \
-        --header "What type of profile?" \
-        --cursor.foreground 208 \
-        --header.foreground 252 \
-        --cursor "▶ " \
-        --selected.foreground 208)
-
-    if [ -z "$profile_type" ]; then
-        print_info "Cancelled."
-        exit 0
-    fi
+        "Third-party API (DeepSeek, Volcano Engine, OpenRouter, etc.)"
+    local profile_type="$INPUT_RESULT"
 
     local is_third_party=false
     case "$profile_type" in
@@ -447,33 +422,16 @@ cmd_create() {
     printf "  ${GREEN}${IC_CHECK}${RESET}  Added alias ${BOLD}claude-${name}${RESET} to ~/.bashrc\n"
 
     echo ""
-
+    print_section "Quick start"
     if [ "$is_third_party" = true ]; then
-        gum style \
-            --border rounded \
-            --border-foreground 240 \
-            --padding "1 2" \
-            --margin "0 2" \
-            "$(gum style --bold 'Quick start')" \
-            "" \
-            "  source ~/.bashrc" \
-            "  $(gum style --foreground 99 "claude-$name")" \
-            "" \
-            "$(gum style --faint 'Third-party API configured — no OAuth login needed.')"
+        printf "    source ~/.bashrc\n"
+        printf "    ${CYAN}claude-%s${RESET}\n\n" "$name"
+        printf "    ${DIM}Third-party API configured — no OAuth login needed.${RESET}\n"
     else
-        gum style \
-            --border rounded \
-            --border-foreground 240 \
-            --padding "1 2" \
-            --margin "0 2" \
-            "$(gum style --bold 'Quick start')" \
-            "" \
-            "  source ~/.bashrc" \
-            "  $(gum style --foreground 99 "claude-switch $name")" \
-            "" \
-            "$(gum style --faint 'Claude will prompt you to log in on first launch.')"
+        printf "    source ~/.bashrc\n"
+        printf "    ${CYAN}claude-switch %s${RESET}\n\n" "$name"
+        printf "    ${DIM}Claude will prompt you to log in on first launch.${RESET}\n"
     fi
-
     echo ""
 }
 
@@ -551,24 +509,12 @@ cmd_delete() {
     local dir
     dir="$(profile_dir "$name")"
 
-    echo ""
-    gum style \
-        --border rounded \
-        --border-foreground 196 \
-        --padding "1 2" \
-        --margin "0 2" \
-        "$(gum style --bold --foreground 196 "Delete profile '${name}'")" \
-        "" \
-        "This will permanently remove:" \
-        "  - Profile directory: ~/.claude-${name}/" \
-        "  - Alias 'claude-${name}' from ~/.bashrc" \
-        "  - Sessions, history, and cached data" \
-        "" \
-        "$(gum style --faint 'OAuth tokens in macOS Keychain may persist.')"
-
+    print_section "Delete profile '${name}'" \
+        "Removes ~/.claude-${name}/, the alias from ~/.bashrc, and all sessions."
+    print_dim "OAuth tokens in macOS Keychain may persist."
     echo ""
 
-    if ! gum confirm "Delete profile '${name}'?" --affirmative "Yes, delete" --negative "Cancel" --default=false; then
+    if ! ask_confirm "Delete profile '${name}'?"; then
         echo ""
         print_info "Cancelled."
         echo ""
@@ -672,7 +618,7 @@ cmd_config() {
         printf "    ${DIM}Subagent:  %s${RESET}\n" "$(read_provider_field "$cfg" "subagent_model")"
         echo ""
 
-        if ! gum confirm "Reconfigure this profile?" --affirmative "Yes" --negative "Cancel" --default=false; then
+        if ! ask_confirm "Reconfigure this profile?"; then
             echo ""
             print_info "Cancelled."
             return
@@ -700,21 +646,15 @@ cmd_config() {
 cmd_interactive() {
     print_header
 
-    local choice
-    choice=$(gum choose \
+    ask_choose "What would you like to do?" \
         "Create a new profile" \
         "List all profiles" \
         "Launch a profile" \
         "Configure API for a profile" \
         "Delete a profile" \
-        "Exit" \
-        --header "What would you like to do?" \
-        --cursor.foreground 208 \
-        --header.foreground 252 \
-        --cursor "▶ " \
-        --selected.foreground 208)
+        "Exit"
 
-    case "$choice" in
+    case "$INPUT_RESULT" in
         "Create a new profile")           cmd_create ;;
         "List all profiles")              cmd_list ;;
         "Launch a profile")               cmd_launch ;;
@@ -762,15 +702,6 @@ main() {
         print_dim "Install it first: https://docs.anthropic.com/en/docs/claude-code"
         exit 1
     fi
-
-    # Check remaining prerequisites (skip for help/version, which need neither)
-    case "${1:-}" in
-        help|-h|--help|version|-v|--version) ;;
-        *)
-            ensure_python3
-            ensure_gum
-            ;;
-    esac
 
     case "${1:-}" in
         create)              shift; cmd_create "$@" ;;

@@ -9,12 +9,14 @@ while shared config (`skills`, `CLAUDE.md`, `plugins`, `projects`) is symlinked 
 third-party Anthropic-compatible API (DeepSeek, Volcano Engine / Ark, OpenRouter,
 GLM, …).
 
+**Pure bash, zero external runtimes** — no `gum`, no `python3`, no `jq`. Just
+`claude`, `bash`, and standard coreutils.
+
 ## Requirements
 
 - [`claude`](https://docs.anthropic.com/en/docs/claude-code) (Claude Code CLI) in `PATH`
-- [`gum`](https://github.com/charmbracelet/gum) — for interactive menus (`brew install gum`)
-- `python3` — for reading/writing provider config
-- `bash`
+- `bash` 4+ (for `read -r`, regex, and parameter substitution)
+- Standard coreutils (`sed`, `grep`, `printf`) — present on every Linux/macOS
 
 ## Install
 
