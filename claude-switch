@@ -3,22 +3,16 @@ set -euo pipefail
 
 # ─────────────────────────────────────────────────────────────────────────────
 # claude-switch — Run multiple Claude Code accounts on one machine
-#                 Now with third-party API provider support!
+#                 With third-party API provider support.
 # ─────────────────────────────────────────────────────────────────────────────
 
-VERSION="2.1.0"
+VERSION="2.2.0"
 CLAUDE_HOME="$HOME/.claude"
 PROFILE_PREFIX="$HOME/.claude-"
 PROFILE_MARKER=".profile-name"
 PROVIDER_CONFIG=".provider.json"
 ZSHRC="$HOME/.bashrc"
 SHARED_ITEMS="skills CLAUDE.md plugins projects"
-
-# Antigravity (agy) defaults — Claude via a local Antigravity→Anthropic proxy
-AGY_DEFAULT_PORT="8080"
-AGY_PROXY_CMD_DEFAULT="npx -y antigravity-claude-proxy@latest start"
-AGY_OPUS="claude-opus-4-6-thinking"
-AGY_SONNET="claude-sonnet-4-6"
 
 # ── Colors & Icons ───────────────────────────────────────────────────────────
 
@@ -39,7 +33,7 @@ IC_PERSON="\xe2\x97\x89"  # ◉
 IC_LINK="\xe2\x86\x92"    # →
 IC_API="\xe2\x97\x86"     # ◆
 
-# ── Gum helpers ──────────────────────────────────────────────────────────────
+# ── Prereq helpers ───────────────────────────────────────────────────────────
 
 ensure_gum() {
     if command -v gum >/dev/null 2>&1; then
@@ -189,12 +183,10 @@ print(data.get(os.environ['CS_FIELD'], ''))
 write_provider_config() {
     local dir="$1" base_url="$2" auth_token="$3" model="$4"
     local haiku="${5:-$model}" sonnet="${6:-$model}" opus="${7:-$model}" subagent="${8:-$model}"
-    local provider="${9:-custom}" proxy_command="${10:-}"
     # Values passed via env (not string-interpolated) to avoid quote injection.
     CS_FILE="$dir/$PROVIDER_CONFIG" \
     CS_BASE_URL="$base_url" CS_AUTH="$auth_token" CS_MODEL="$model" \
     CS_HAIKU="$haiku" CS_SONNET="$sonnet" CS_OPUS="$opus" CS_SUBAGENT="$subagent" \
-    CS_PROVIDER="$provider" CS_PROXY="$proxy_command" \
     python3 -c "
 import json, os
 data = {
@@ -205,8 +197,6 @@ data = {
     'sonnet_model': os.environ['CS_SONNET'],
     'opus_model': os.environ['CS_OPUS'],
     'subagent_model': os.environ['CS_SUBAGENT'],
-    'provider': os.environ['CS_PROVIDER'],
-    'proxy_command': os.environ['CS_PROXY'],
 }
 with open(os.environ['CS_FILE'], 'w') as f:
     json.dump(data, f, indent=2)
@@ -227,65 +217,6 @@ build_env_prefix() {
 
     printf 'ANTHROPIC_BASE_URL="%s" \\\n    ANTHROPIC_AUTH_TOKEN="%s" \\\n    ANTHROPIC_MODEL="%s" \\\n    ANTHROPIC_DEFAULT_OPUS_MODEL="%s" \\\n    ANTHROPIC_DEFAULT_SONNET_MODEL="%s" \\\n    ANTHROPIC_DEFAULT_HAIKU_MODEL="%s" \\\n    CLAUDE_CODE_SUBAGENT_MODEL="%s" \\\n    ' \
         "$base_url" "$auth_token" "$model" "$opus" "$sonnet" "$haiku" "$subagent"
-}
-
-# ── Antigravity proxy helpers ────────────────────────────────────────────────
-
-# Parse "http://host:port/path" into "host port" (defaults: localhost / 80).
-proxy_host_port() {
-    local url="$1" hostport host port
-    hostport="${url#*://}"      # strip scheme
-    hostport="${hostport%%/*}"  # strip path
-    host="${hostport%%:*}"
-    port="${hostport##*:}"
-    [ "$port" = "$hostport" ] && port="80"   # no colon → default port
-    [ -z "$host" ] && host="localhost"
-    [ -z "$port" ] && port="80"
-    echo "$host $port"
-}
-
-# Returns 0 if something is listening on the proxy's host:port.
-proxy_is_up() {
-    local url="$1" hp host port
-    hp="$(proxy_host_port "$url")"
-    host="${hp%% *}"; port="${hp##* }"
-    (exec 3<>"/dev/tcp/$host/$port") 2>/dev/null && return 0 || return 1
-}
-
-# For Antigravity profiles: ensure the proxy is reachable, auto-starting it if
-# a proxy_command is configured. Returns non-zero if it cannot be made ready.
-ensure_proxy_running() {
-    local cfg="$1" dir base_url proxy_cmd
-    dir="${cfg%/*}"
-    base_url=$(read_provider_field "$cfg" "base_url")
-    proxy_cmd=$(read_provider_field "$cfg" "proxy_command")
-
-    if proxy_is_up "$base_url"; then
-        return 0
-    fi
-
-    print_warn "Antigravity proxy not reachable at $base_url"
-    if [ -z "$proxy_cmd" ]; then
-        print_dim "Start your proxy and retry, e.g.:  $AGY_PROXY_CMD_DEFAULT"
-        return 1
-    fi
-
-    local logf="$dir/proxy.log"
-    print_info "Starting proxy: $proxy_cmd"
-    print_dim "Logs: $logf"
-    nohup bash -c "$proxy_cmd" >"$logf" 2>&1 &
-    echo "$!" > "$dir/proxy.pid"
-
-    local i
-    for i in $(seq 1 30); do
-        if proxy_is_up "$base_url"; then
-            print_success "Proxy is up (pid $(cat "$dir/proxy.pid"))"
-            return 0
-        fi
-        sleep 1
-    done
-    print_error "Proxy did not come up within 30s. Check $logf"
-    return 1
 }
 
 # ── Commands ─────────────────────────────────────────────────────────────────
@@ -411,83 +342,6 @@ configure_third_party() {
     print_success "Third-party API configured"
 }
 
-configure_antigravity() {
-    local dir="$1" name="$2"
-
-    echo ""
-    gum style \
-        --border rounded \
-        --border-foreground 213 \
-        --padding "1 2" \
-        --margin "0 2" \
-        "$(gum style --bold --foreground 213 '🪐 Antigravity (agy) — Claude via Google Antigravity')" \
-        "" \
-        "$(gum style --faint 'Routes Claude Code through a local proxy backed by your Google Antigravity subscription.')"
-    echo ""
-
-    print_warn "Using Antigravity as an API backend may violate Google's Terms of Service."
-    print_dim  "Some users have reported account bans/shadow-bans. Use your own account at your own risk."
-    echo ""
-
-    # Proxy base URL (the proxy must be running locally)
-    local base_url
-    base_url=$(gum input \
-        --placeholder "http://localhost:${AGY_DEFAULT_PORT}" \
-        --value "http://localhost:${AGY_DEFAULT_PORT}" \
-        --header "Proxy Base URL" \
-        --width 70 \
-        --cursor.foreground 213 \
-        --header.foreground 252)
-    [ -z "$base_url" ] && base_url="http://localhost:${AGY_DEFAULT_PORT}"
-
-    # Models (preset to Antigravity's Claude names, overridable)
-    local opus sonnet
-    opus=$(gum input \
-        --placeholder "$AGY_OPUS" --value "$AGY_OPUS" \
-        --header "Opus model (complex tasks)" \
-        --width 70 --cursor.foreground 213 --header.foreground 252)
-    [ -z "$opus" ] && opus="$AGY_OPUS"
-
-    sonnet=$(gum input \
-        --placeholder "$AGY_SONNET" --value "$AGY_SONNET" \
-        --header "Sonnet/Haiku model (everything else)" \
-        --width 70 --cursor.foreground 213 --header.foreground 252)
-    [ -z "$sonnet" ] && sonnet="$AGY_SONNET"
-
-    # Optional auto-start of the proxy on launch
-    local proxy_cmd=""
-    echo ""
-    if gum confirm "Auto-start the proxy when launching this profile?" --affirmative "Yes" --negative "No, I'll start it myself" --default=true; then
-        proxy_cmd=$(gum input \
-            --placeholder "$AGY_PROXY_CMD_DEFAULT" --value "$AGY_PROXY_CMD_DEFAULT" \
-            --header "Command to start the proxy" \
-            --width 70 --cursor.foreground 213 --header.foreground 252)
-        [ -z "$proxy_cmd" ] && proxy_cmd="$AGY_PROXY_CMD_DEFAULT"
-    fi
-
-    # The proxy authenticates to Google via OAuth; Claude Code's token is a dummy.
-    local token="test"
-
-    # write_provider_config args: dir base_url token model haiku sonnet opus subagent provider proxy_cmd
-    write_provider_config "$dir" "$base_url" "$token" "$opus" "$sonnet" "$sonnet" "$opus" "$sonnet" "antigravity" "$proxy_cmd"
-
-    rm -f "$dir/settings.json" 2>/dev/null || true
-    printf '{\n  "theme": "dark",\n  "model": "%s"\n}\n' "$opus" > "$dir/settings.json"
-    printf '{\n  "hasCompletedOnboarding": true\n}\n' > "$dir/.claude.json"
-
-    echo ""
-    printf "    ${DIM}${IC_API} Proxy URL:  %s${RESET}\n" "$base_url"
-    printf "    ${DIM}${IC_API} Opus:       %s${RESET}\n" "$opus"
-    printf "    ${DIM}${IC_API} Sonnet:     %s${RESET}\n" "$sonnet"
-    if [ -n "$proxy_cmd" ]; then
-        printf "    ${DIM}${IC_API} Auto-start: %s${RESET}\n" "$proxy_cmd"
-    else
-        printf "    ${DIM}${IC_API} Auto-start: off (start the proxy yourself)${RESET}\n"
-    fi
-    echo ""
-    print_success "Antigravity profile configured"
-}
-
 cmd_create() {
     local name="${1:-}"
     if [ -z "$name" ]; then
@@ -522,7 +376,6 @@ cmd_create() {
     local profile_type
     profile_type=$(gum choose \
         "Anthropic (OAuth login)" \
-        "Antigravity (agy) — Claude Opus via Google Antigravity" \
         "Third-party API (DeepSeek, Volcano Engine, OpenRouter, etc.)" \
         --header "What type of profile?" \
         --cursor.foreground 208 \
@@ -535,9 +388,8 @@ cmd_create() {
         exit 0
     fi
 
-    local is_third_party=false is_antigravity=false
+    local is_third_party=false
     case "$profile_type" in
-        "Antigravity"*) is_third_party=true; is_antigravity=true ;;
         "Third-party"*) is_third_party=true ;;
     esac
 
@@ -566,9 +418,7 @@ cmd_create() {
     print_success "Profile created at ~/.claude-$name/"
 
     # Configure provider if selected
-    if [ "$is_antigravity" = true ]; then
-        configure_antigravity "$dir" "$name"
-    elif [ "$is_third_party" = true ]; then
+    if [ "$is_third_party" = true ]; then
         configure_third_party "$dir" "$name"
     fi
 
@@ -585,11 +435,7 @@ cmd_create() {
         sed -i "/^alias claude-${name}=/d" "$ZSHRC" 2>/dev/null || true
     fi
 
-    if [ "$is_antigravity" = true ]; then
-        # Route through claude-switch so the proxy is health-checked / auto-started.
-        printf '\n# Claude profile: %s (antigravity)\nalias claude-%s='\''claude-switch %s'\''\n' \
-            "$name" "$name" "$name" >> "$ZSHRC"
-    elif [ "$is_third_party" = true ]; then
+    if [ "$is_third_party" = true ]; then
         local env_prefix
         env_prefix=$(build_env_prefix "$dir")
         printf '\n# Claude profile: %s (third-party API)\nalias claude-%s='\''%sCLAUDE_CONFIG_DIR="%s" claude'\''\n' \
@@ -602,20 +448,7 @@ cmd_create() {
 
     echo ""
 
-    if [ "$is_antigravity" = true ]; then
-        gum style \
-            --border rounded \
-            --border-foreground 240 \
-            --padding "1 2" \
-            --margin "0 2" \
-            "$(gum style --bold 'Quick start')" \
-            "" \
-            "  source ~/.bashrc" \
-            "  $(gum style --foreground 213 "claude-$name")" \
-            "" \
-            "$(gum style --faint 'Launching health-checks the proxy and starts it if needed.')" \
-            "$(gum style --faint 'Make sure your Antigravity (agy) account is logged in.')"
-    elif [ "$is_third_party" = true ]; then
+    if [ "$is_third_party" = true ]; then
         gum style \
             --border rounded \
             --border-foreground 240 \
@@ -670,23 +503,11 @@ cmd_list() {
 
             # Check if third-party API profile
             if [ -f "$dir/$PROVIDER_CONFIG" ]; then
-                local api_model provider_kind
+                local api_model
                 api_model=$(read_provider_field "$dir/$PROVIDER_CONFIG" "model")
-                provider_kind=$(read_provider_field "$dir/$PROVIDER_CONFIG" "provider")
-                if [ "$provider_kind" = "antigravity" ]; then
-                    local up
-                    if proxy_is_up "$(read_provider_field "$dir/$PROVIDER_CONFIG" "base_url")"; then
-                        up="${GREEN}● proxy up${RESET}"
-                    else
-                        up="${RED}○ proxy down${RESET}"
-                    fi
-                    printf "  🪐  ${BOLD}%-16s${RESET} ${DIM}%-24s${RESET} ${MAGENTA}agy: %s${RESET}  %b\n" \
-                        "$name" "~/.claude-$name/" "$api_model" "$up"
-                else
-                    provider_label="API: $api_model"
-                    printf "  ${IC_API}  ${BOLD}%-16s${RESET} ${DIM}%-24s${RESET} ${MAGENTA}${IC_CHECK} %s${RESET}\n" \
-                        "$name" "~/.claude-$name/" "$provider_label"
-                fi
+                provider_label="API: $api_model"
+                printf "  ${IC_API}  ${BOLD}%-16s${RESET} ${DIM}%-24s${RESET} ${MAGENTA}${IC_CHECK} %s${RESET}\n" \
+                    "$name" "~/.claude-$name/" "$provider_label"
             else
                 status=$(check_auth_status "$dir")
                 if [ -n "$status" ]; then
@@ -792,15 +613,6 @@ cmd_launch() {
     # If third-party API profile, pass env vars
     if [ -f "$dir/$PROVIDER_CONFIG" ]; then
         local cfg="$dir/$PROVIDER_CONFIG"
-
-        # Antigravity profiles need their local proxy reachable first.
-        if [ "$(read_provider_field "$cfg" "provider")" = "antigravity" ]; then
-            ensure_proxy_running "$cfg" || {
-                print_error "Antigravity proxy unavailable — aborting launch."
-                exit 1
-            }
-        fi
-
         local base_url auth_token model haiku sonnet opus subagent
         base_url=$(read_provider_field "$cfg" "base_url")
         auth_token=$(read_provider_field "$cfg" "auth_token")
@@ -867,92 +679,21 @@ cmd_config() {
         fi
     fi
 
-    # Keep Antigravity profiles as Antigravity when reconfiguring.
-    local was_antigravity=false
-    [ "$(read_provider_field "$dir/$PROVIDER_CONFIG" "provider")" = "antigravity" ] && was_antigravity=true
-
-    if [ "$was_antigravity" = true ]; then
-        configure_antigravity "$dir" "$name"
-    else
-        configure_third_party "$dir" "$name"
-    fi
+    configure_third_party "$dir" "$name"
 
     # Update alias in shell rc
     if [ -f "$ZSHRC" ]; then
         sed -i "/^# Claude profile: ${name}/d" "$ZSHRC" 2>/dev/null || true
         sed -i "/^alias claude-${name}=/d" "$ZSHRC" 2>/dev/null || true
 
-        if [ "$was_antigravity" = true ]; then
-            printf '\n# Claude profile: %s (antigravity)\nalias claude-%s='\''claude-switch %s'\''\n' \
-                "$name" "$name" "$name" >> "$ZSHRC"
-        else
-            local env_prefix
-            env_prefix=$(build_env_prefix "$dir")
-            printf '\n# Claude profile: %s (third-party API)\nalias claude-%s='\''%sCLAUDE_CONFIG_DIR="%s" claude'\''\n' \
-                "$name" "$name" "$env_prefix" "$dir" >> "$ZSHRC"
-        fi
+        local env_prefix
+        env_prefix=$(build_env_prefix "$dir")
+        printf '\n# Claude profile: %s (third-party API)\nalias claude-%s='\''%sCLAUDE_CONFIG_DIR="%s" claude'\''\n' \
+            "$name" "$name" "$env_prefix" "$dir" >> "$ZSHRC"
         echo ""
         print_success "Updated alias in ~/.bashrc"
         print_info "Run 'source ~/.bashrc' to refresh."
     fi
-    echo ""
-}
-
-cmd_proxy() {
-    local name="${1:-}" action="${2:-status}"
-    if [ -z "$name" ]; then
-        name=$(pick_profile "manage the proxy for") || exit 1
-    fi
-
-    if ! profile_exists "$name"; then
-        print_error "Profile '$name' does not exist."
-        exit 1
-    fi
-
-    local dir cfg
-    dir="$(profile_dir "$name")"
-    cfg="$dir/$PROVIDER_CONFIG"
-
-    if [ "$(read_provider_field "$cfg" "provider")" != "antigravity" ]; then
-        print_error "'$name' is not an Antigravity profile."
-        exit 1
-    fi
-
-    local base_url pidfile
-    base_url=$(read_provider_field "$cfg" "base_url")
-    pidfile="$dir/proxy.pid"
-
-    echo ""
-    case "$action" in
-        status)
-            if proxy_is_up "$base_url"; then
-                print_success "Proxy is up at $base_url"
-            else
-                print_warn "Proxy is down ($base_url)"
-            fi
-            ;;
-        start)
-            ensure_proxy_running "$cfg"
-            ;;
-        stop)
-            if [ -f "$pidfile" ]; then
-                local pid; pid="$(cat "$pidfile")"
-                if kill "$pid" 2>/dev/null; then
-                    print_success "Stopped proxy (pid $pid)"
-                else
-                    print_warn "No running process for pid $pid (already stopped)."
-                fi
-                rm -f "$pidfile"
-            else
-                print_warn "No pid file — proxy was not started by claude-switch."
-                print_dim "Stop it wherever you launched it."
-            fi
-            ;;
-        *)
-            print_error "Unknown action '$action'. Use: start | stop | status"
-            exit 1
-            ;;
-    esac
     echo ""
 }
 
@@ -965,7 +706,6 @@ cmd_interactive() {
         "List all profiles" \
         "Launch a profile" \
         "Configure API for a profile" \
-        "Manage Antigravity proxy" \
         "Delete a profile" \
         "Exit" \
         --header "What would you like to do?" \
@@ -979,7 +719,6 @@ cmd_interactive() {
         "List all profiles")              cmd_list ;;
         "Launch a profile")               cmd_launch ;;
         "Configure API for a profile")    cmd_config ;;
-        "Manage Antigravity proxy")       cmd_proxy ;;
         "Delete a profile")               cmd_delete ;;
         "Exit"|"")                        exit 0 ;;
     esac
@@ -992,17 +731,13 @@ cmd_help() {
     printf "    claude-switch ${DIM}<profile-name>${RESET}          ${DIM}# quick launch${RESET}\n\n"
     printf "  ${BOLD}COMMANDS${RESET}\n"
     printf "    ${CYAN}<name>${RESET}                Launch Claude with that profile\n"
-    printf "    ${CYAN}create${RESET} ${DIM}[name]${RESET}         Create a new profile (Anthropic / Antigravity / third-party)\n"
+    printf "    ${CYAN}create${RESET} ${DIM}[name]${RESET}         Create a new profile (Anthropic OAuth or third-party API)\n"
     printf "    ${CYAN}config${RESET} ${DIM}[name]${RESET}         Configure/reconfigure API for a profile\n"
-    printf "    ${CYAN}proxy${RESET}  ${DIM}[name] [act]${RESET}   Manage an Antigravity proxy (start|stop|status)\n"
     printf "    ${CYAN}list${RESET}                  List all profiles and auth status\n"
     printf "    ${CYAN}delete${RESET} ${DIM}[name]${RESET}         Delete a profile\n"
     printf "    ${CYAN}help${RESET}                  Show this help message\n"
     printf "    ${CYAN}version${RESET}               Show version\n\n"
     printf "  ${BOLD}EXAMPLES${RESET}\n"
-    printf "    ${DIM}claude-switch create agy${RESET}         ${DIM}# create Antigravity (Opus 4.6) profile${RESET}\n"
-    printf "    ${DIM}claude-switch agy${RESET}                ${DIM}# launch it (auto-starts the proxy)${RESET}\n"
-    printf "    ${DIM}claude-switch proxy agy status${RESET}   ${DIM}# is the proxy up?${RESET}\n"
     printf "    ${DIM}claude-switch create deepseek${RESET}    ${DIM}# create + configure DeepSeek API${RESET}\n"
     printf "    ${DIM}claude-switch deepseek${RESET}           ${DIM}# launch deepseek profile${RESET}\n"
     printf "    ${DIM}claude-switch list${RESET}               ${DIM}# show all profiles${RESET}\n"
@@ -1011,11 +746,6 @@ cmd_help() {
     printf "    Each profile gets its own ~/.claude-<name>/ directory with\n"
     printf "    separate credentials and session data. Shared config\n"
     printf "    (skills, CLAUDE.md, plugins) is symlinked from ~/.claude/.\n\n"
-    printf "  ${BOLD}ANTIGRAVITY (agy)${RESET}\n"
-    printf "    Use Claude Opus 4.6 via your Google Antigravity subscription through\n"
-    printf "    a local proxy. 'create' presets the models + URL; launching the\n"
-    printf "    profile health-checks the proxy and auto-starts it if configured.\n"
-    printf "    ${YELLOW}Note:${RESET} may violate Google's ToS — accounts have been banned.\n\n"
     printf "  ${BOLD}THIRD-PARTY API${RESET}\n"
     printf "    During 'create', choose \"Third-party API\" to configure:\n"
     printf "    • Base URL, API Key, and Model names\n"
@@ -1045,7 +775,6 @@ main() {
     case "${1:-}" in
         create)              shift; cmd_create "$@" ;;
         config|configure)    shift; cmd_config "$@" ;;
-        proxy)               shift; cmd_proxy "$@" ;;
         list|ls)             shift; cmd_list "$@" ;;
         delete|rm|remove)    shift; cmd_delete "$@" ;;
         launch|run|start)    shift; cmd_launch "$@" ;;

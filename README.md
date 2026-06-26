@@ -5,11 +5,9 @@ Run multiple Claude Code accounts on one machine — with third-party API provid
 A single-file Bash tool that manages isolated Claude Code profiles. Each profile
 gets its own `~/.claude-<name>/` directory (separate credentials and session data),
 while shared config (`skills`, `CLAUDE.md`, `plugins`, `projects`) is symlinked from
-`~/.claude/`. Profiles can authenticate via Anthropic OAuth, route through your
-**Google Antigravity** subscription (Claude Opus 4.6 via a local proxy), **or** point
-at any third-party Anthropic-compatible API (DeepSeek, Volcano Engine / Ark, OpenRouter, GLM, …).
-
-> Note: this is a standalone Bash implementation, unrelated to the TypeScript project on `main`.
+`~/.claude/`. Profiles can authenticate via Anthropic OAuth **or** point at any
+third-party Anthropic-compatible API (DeepSeek, Volcano Engine / Ark, OpenRouter,
+GLM, …).
 
 ## Requirements
 
@@ -30,9 +28,8 @@ install -m 755 claude-switch ~/.local/bin/claude-switch
 ```bash
 claude-switch                     # interactive menu
 claude-switch <profile-name>      # quick-launch a profile
-claude-switch create [name]       # create a profile (Anthropic / Antigravity / third-party)
+claude-switch create [name]       # create a profile (Anthropic OAuth / third-party)
 claude-switch config [name]       # (re)configure a profile's API
-claude-switch proxy [name] [act]  # manage an Antigravity proxy: start | stop | status
 claude-switch list                # list profiles and auth status
 claude-switch delete [name]       # delete a profile
 claude-switch help                # show help
@@ -56,42 +53,6 @@ claude-switch list                # show all profiles
 - Shared items (`skills`, `CLAUDE.md`, `plugins`, `projects`) are symlinked from
   `~/.claude/` so you maintain them once.
 - `create` adds a `claude-<name>` alias to `~/.bashrc` for convenience.
-
-### Antigravity (agy) profiles — Claude Opus 4.6 via Google Antigravity
-
-Choose **Antigravity (agy)** during `create` to use Claude through your Google
-Antigravity subscription instead of an Anthropic API key. Claude Code talks to a
-**local proxy** that translates Anthropic Messages ↔ Google Cloud Code, reusing the
-OAuth login from the Antigravity app / `agy` CLI.
-
-`claude-switch` doesn't ship the proxy — it drives one. The wizard presets the model
-names (`claude-opus-4-6-thinking`, `claude-sonnet-4-6`), the base URL
-(`http://localhost:8080`), and a dummy token, and optionally records a command to
-**auto-start** the proxy. On launch, `claude-switch`:
-
-1. health-checks the proxy's port,
-2. auto-starts it (if a start command was configured) and waits until it's reachable,
-3. then launches Claude Code pointed at it.
-
-```bash
-claude-switch create agy          # pick "Antigravity (agy)", accept the defaults
-claude-switch agy                 # launches; starts the proxy if it's down
-claude-switch proxy agy status    # up / down
-claude-switch proxy agy stop      # stop a proxy claude-switch started
-```
-
-You need a working proxy installed. Popular options (pick one, see its README):
-
-- [`antigravity-claude-proxy`](https://github.com/badrisnarayanan/antigravity-claude-proxy)
-  — `npx -y antigravity-claude-proxy@latest start` (the default start command), port `8080`.
-- [`claude-code-via-antigravity`](https://github.com/SovranAMR/claude-code-via-antigravity)
-  — port `51200` (set the base URL to `http://localhost:51200` during `create`).
-
-> ⚠️ **Terms of Service / ban risk.** Google has officially prohibited reverse-proxy
-> use of these models and has **banned/shadow-banned** accounts that do it. This routes
-> *your own* Google Antigravity account through an unofficial proxy — use it at your own
-> risk. `claude-switch` only configures and launches a proxy you choose to run; it does
-> not bypass any authentication.
 
 ### Third-party API profiles
 
