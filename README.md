@@ -54,7 +54,9 @@ claude-switch list                # show all profiles
   `CLAUDE_CONFIG_DIR` pointing at it, so credentials and history stay isolated.
 - Shared items (`skills`, `CLAUDE.md`, `plugins`, `projects`) are symlinked from
   `~/.claude/` so you maintain them once.
-- `create` adds a `claude-<name>` alias to `~/.bashrc` for convenience.
+- `create` adds a `claude-<name>` alias to `~/.bashrc` that simply runs
+  `claude-switch launch <name>` — so **no secrets or provider env are written
+  into your shell rc**.
 
 ### Third-party API profiles
 
@@ -69,5 +71,31 @@ variables when launching:
 You can set one model for everything, or per-tier models (Haiku/Sonnet/Opus +
 subagent) for task routing. No OAuth login is needed — it works immediately.
 
-> API keys are stored locally in each profile's `~/.claude-<name>/.provider.json`.
-> They are **never** committed to this repository.
+### Where the API key is stored (v2.4+)
+
+The key is **never** written in cleartext into `.provider.json` or your shell rc.
+During `create`/`config` you pick a secret backend; the key is handed to it, and
+`.provider.json` keeps only a **retrieval command** (`auth_token_cmd`) that prints
+the key back at launch time — the same pattern as git's `credential.helper`.
+
+Supported backends (auto-detected):
+
+| Backend | Stored with | `auth_token_cmd` |
+| --- | --- | --- |
+| [`pass`](https://www.passwordstore.org/) | `pass insert claude-switch/<name>` | `pass show claude-switch/<name>` |
+| `secret-tool` (libsecret / GNOME Keyring) | `secret-tool store …` | `secret-tool lookup service claude-switch account <name>` |
+| `keychain` (macOS) | `security add-generic-password …` | `security find-generic-password … -w` |
+| `plaintext` (fallback) | `~/.claude-<name>/.token` (chmod 600) | `cat ~/.claude-<name>/.token` |
+
+Because `auth_token_cmd` is just a shell command, you can hand-edit
+`.provider.json` to use **any** source — e.g. `op read op://vault/item/key`
+(1Password CLI), `vault kv get -field=key secret/claude`, or
+`printf %s "$MY_ENV_VAR"`.
+
+> Profiles created before v2.4 used an inline `"auth_token"` field. Those still
+> work (read as a legacy fallback); run `claude-switch config <name>` to migrate
+> one to a secret backend.
+
+> ⚠️ `auth_token_cmd` is executed via `eval` at launch. `.provider.json` lives in
+> your home dir and is written `chmod 600`; treat it like any file that can run
+> code as you (same trust model as a shell rc or git hook).

@@ -6,7 +6,7 @@ set -euo pipefail
 #                 With third-party API provider support. Pure bash.
 # ─────────────────────────────────────────────────────────────────────────────
 
-VERSION="2.3.0"
+VERSION="2.4.0"
 CLAUDE_HOME="$HOME/.claude"
 PROFILE_PREFIX="$HOME/.claude-"
 PROFILE_MARKER=".profile-name"
@@ -222,35 +222,71 @@ read_provider_field() {
 }
 
 write_provider_config() {
-    local dir="$1" base_url="$2" auth_token="$3" model="$4"
+    local dir="$1" base_url="$2" auth_token_cmd="$3" model="$4"
     local haiku="${5:-$model}" sonnet="${6:-$model}" opus="${7:-$model}" subagent="${8:-$model}"
     {
         printf '{\n'
-        printf '  "base_url": "%s",\n'      "$(json_escape "$base_url")"
-        printf '  "auth_token": "%s",\n'    "$(json_escape "$auth_token")"
-        printf '  "model": "%s",\n'         "$(json_escape "$model")"
-        printf '  "haiku_model": "%s",\n'   "$(json_escape "$haiku")"
-        printf '  "sonnet_model": "%s",\n'  "$(json_escape "$sonnet")"
-        printf '  "opus_model": "%s",\n'    "$(json_escape "$opus")"
-        printf '  "subagent_model": "%s"\n' "$(json_escape "$subagent")"
+        printf '  "base_url": "%s",\n'       "$(json_escape "$base_url")"
+        printf '  "auth_token_cmd": "%s",\n' "$(json_escape "$auth_token_cmd")"
+        printf '  "model": "%s",\n'          "$(json_escape "$model")"
+        printf '  "haiku_model": "%s",\n'    "$(json_escape "$haiku")"
+        printf '  "sonnet_model": "%s",\n'   "$(json_escape "$sonnet")"
+        printf '  "opus_model": "%s",\n'     "$(json_escape "$opus")"
+        printf '  "subagent_model": "%s"\n'  "$(json_escape "$subagent")"
         printf '}\n'
     } > "$dir/$PROVIDER_CONFIG"
+    chmod 600 "$dir/$PROVIDER_CONFIG" 2>/dev/null || true
 }
 
-build_env_prefix() {
-    local dir="$1"
-    local cfg="$dir/$PROVIDER_CONFIG"
-    local base_url auth_token model haiku sonnet opus subagent
-    base_url=$(read_provider_field "$cfg" "base_url")
-    auth_token=$(read_provider_field "$cfg" "auth_token")
-    model=$(read_provider_field "$cfg" "model")
-    haiku=$(read_provider_field "$cfg" "haiku_model")
-    sonnet=$(read_provider_field "$cfg" "sonnet_model")
-    opus=$(read_provider_field "$cfg" "opus_model")
-    subagent=$(read_provider_field "$cfg" "subagent_model")
+# ── Secret storage backends ──────────────────────────────────────────────────
+# The API key is NEVER written into .provider.json or your shell rc. It is handed
+# to a secret manager, and .provider.json stores only "auth_token_cmd" — a command
+# that prints the key back at launch time (same idea as git's credential.helper).
+# Because it is just a shell command, you can hand-edit it to use ANY backend:
+#   pass show …        op read …        vault kv get …        printf %s "$MY_ENV"
 
-    printf 'ANTHROPIC_BASE_URL="%s" \\\n    ANTHROPIC_AUTH_TOKEN="%s" \\\n    ANTHROPIC_MODEL="%s" \\\n    ANTHROPIC_DEFAULT_OPUS_MODEL="%s" \\\n    ANTHROPIC_DEFAULT_SONNET_MODEL="%s" \\\n    ANTHROPIC_DEFAULT_HAIKU_MODEL="%s" \\\n    CLAUDE_CODE_SUBAGENT_MODEL="%s" \\\n    ' \
-        "$base_url" "$auth_token" "$model" "$opus" "$sonnet" "$haiku" "$subagent"
+SECRET_SERVICE="claude-switch"   # namespace inside the secret manager
+
+detect_secret_backends() {
+    command -v pass        >/dev/null 2>&1 && echo "pass"
+    command -v secret-tool >/dev/null 2>&1 && echo "secret-tool"
+    [ "$(uname)" = "Darwin" ] && command -v security >/dev/null 2>&1 && echo "keychain"
+    echo "plaintext"
+}
+
+# store_secret <backend> <name> <dir> <token>  → prints the auth_token_cmd to save
+store_secret() {
+    local backend="$1" name="$2" dir="$3" token="$4"
+    case "$backend" in
+        pass)
+            printf '%s\n' "$token" | pass insert -m -f "${SECRET_SERVICE}/${name}" >/dev/null || return 1
+            printf 'pass show %s/%s' "$SECRET_SERVICE" "$name" ;;
+        secret-tool)
+            printf '%s' "$token" | secret-tool store --label="${SECRET_SERVICE}: ${name}" \
+                service "$SECRET_SERVICE" account "$name" || return 1
+            printf 'secret-tool lookup service %s account %s' "$SECRET_SERVICE" "$name" ;;
+        keychain)
+            security add-generic-password -U -s "$SECRET_SERVICE" -a "$name" -w "$token" >/dev/null 2>&1 || return 1
+            printf 'security find-generic-password -s %s -a %s -w' "$SECRET_SERVICE" "$name" ;;
+        plaintext)
+            local tf="$dir/.token"
+            ( umask 077; printf '%s' "$token" > "$tf" ) || return 1
+            print_warn "Key saved in cleartext at $tf (chmod 600) — a secret manager is safer." >&2
+            printf 'cat %s' "$tf" ;;
+        *) return 1 ;;
+    esac
+}
+
+# resolve_auth_token <dir> → prints the live API key by running auth_token_cmd,
+# falling back to a legacy inline "auth_token" from pre-2.4 config files.
+resolve_auth_token() {
+    local dir="$1" cfg="$dir/$PROVIDER_CONFIG" cmd
+    cmd=$(read_provider_field "$cfg" "auth_token_cmd")
+    if [ -n "$cmd" ]; then
+        eval "$cmd"
+    else
+        read_provider_field "$cfg" "auth_token"   # legacy plaintext
+    fi
 }
 
 # ── Commands ─────────────────────────────────────────────────────────────────
@@ -303,8 +339,17 @@ configure_third_party() {
         [ -z "$subagent" ] && subagent="$haiku"
     fi
 
-    # Save provider config
-    write_provider_config "$dir" "$base_url" "$auth_token" "$model" "$haiku" "$sonnet" "$opus" "$subagent"
+    # Hand the key to a secret manager; .provider.json keeps only a retrieval command.
+    print_section "🔐 Where to keep the API key" \
+        "claude-switch stores only a command that fetches it — never the key itself."
+    local backends=(); while IFS= read -r b; do backends+=("$b"); done < <(detect_secret_backends)
+    ask_choose "Secret storage backend:" "${backends[@]}"
+    local backend="$INPUT_RESULT" auth_token_cmd
+    auth_token_cmd=$(store_secret "$backend" "$name" "$dir" "$auth_token") || {
+        print_error "Could not store the key via '$backend'."; return 1; }
+
+    # Save provider config (retrieval command only, no plaintext key)
+    write_provider_config "$dir" "$base_url" "$auth_token_cmd" "$model" "$haiku" "$sonnet" "$opus" "$subagent"
 
     # Create settings.json with model (don't symlink from shared)
     rm -f "$dir/settings.json" 2>/dev/null || true
@@ -315,7 +360,8 @@ configure_third_party() {
 
     echo ""
     printf "    ${DIM}${IC_API} Base URL:  %s${RESET}\n" "$base_url"
-    printf "    ${DIM}${IC_API} API Key:   %s****${RESET}\n" "$(echo "$auth_token" | head -c 12)"
+    printf "    ${DIM}${IC_API} Key store: %s${RESET}\n" "$backend"
+    printf "    ${DIM}${IC_API} Retrieval: %s${RESET}\n" "$auth_token_cmd"
     printf "    ${DIM}${IC_API} Model:     %s${RESET}\n" "$model"
     if [ "$haiku" != "$model" ] || [ "$sonnet" != "$model" ] || [ "$opus" != "$model" ]; then
         printf "    ${DIM}${IC_API} Opus:      %s${RESET}\n" "$opus"
@@ -410,15 +456,11 @@ cmd_create() {
         sed -i "/^alias claude-${name}=/d" "$ZSHRC" 2>/dev/null || true
     fi
 
-    if [ "$is_third_party" = true ]; then
-        local env_prefix
-        env_prefix=$(build_env_prefix "$dir")
-        printf '\n# Claude profile: %s (third-party API)\nalias claude-%s='\''%sCLAUDE_CONFIG_DIR="%s" claude'\''\n' \
-            "$name" "$name" "$env_prefix" "$dir" >> "$ZSHRC"
-    else
-        printf '\n# Claude profile: %s\nalias claude-%s='\''CLAUDE_CONFIG_DIR="%s" claude'\''\n' \
-            "$name" "$name" "$dir" >> "$ZSHRC"
-    fi
+    # The alias just delegates to claude-switch, which resolves the key (and the
+    # provider env) at launch. No secret — and no provider config — is ever
+    # written into ~/.bashrc.
+    printf "\n# Claude profile: %s\nalias claude-%s='claude-switch launch %s'\n" \
+        "$name" "$name" "$name" >> "$ZSHRC"
     printf "  ${GREEN}${IC_CHECK}${RESET}  Added alias ${BOLD}claude-${name}${RESET} to ~/.bashrc\n"
 
     echo ""
@@ -509,6 +551,9 @@ cmd_delete() {
     local dir
     dir="$(profile_dir "$name")"
 
+    local sec_hint=""
+    [ -f "$dir/$PROVIDER_CONFIG" ] && sec_hint=$(read_provider_field "$dir/$PROVIDER_CONFIG" "auth_token_cmd")
+
     print_section "Delete profile '${name}'" \
         "Removes ~/.claude-${name}/, the alias from ~/.bashrc, and all sessions."
     print_dim "OAuth tokens in macOS Keychain may persist."
@@ -526,6 +571,11 @@ cmd_delete() {
     rm -rf "$dir"
     print_success "Removed ~/.claude-$name/"
 
+    if [ -n "$sec_hint" ]; then
+        print_info "The API key is still in your secret manager — remove it if unused:"
+        print_dim "was fetched via:  $sec_hint"
+    fi
+
     if [ -f "$ZSHRC" ]; then
         sed -i "/^# Claude profile: ${name}/d" "$ZSHRC" 2>/dev/null || true
         sed -i "/^alias claude-${name}=/d" "$ZSHRC" 2>/dev/null || true
@@ -541,10 +591,12 @@ cmd_launch() {
     local name="${1:-}"
     if [ -z "$name" ]; then
         name=$(pick_profile "launch") || exit 1
+    else
+        shift   # remaining args are forwarded to claude
     fi
 
     if [ "$name" = "default" ]; then
-        exec claude
+        exec claude "$@"
     fi
 
     if ! profile_exists "$name"; then
@@ -561,12 +613,18 @@ cmd_launch() {
         local cfg="$dir/$PROVIDER_CONFIG"
         local base_url auth_token model haiku sonnet opus subagent
         base_url=$(read_provider_field "$cfg" "base_url")
-        auth_token=$(read_provider_field "$cfg" "auth_token")
+        auth_token=$(resolve_auth_token "$dir") || true
         model=$(read_provider_field "$cfg" "model")
         haiku=$(read_provider_field "$cfg" "haiku_model")
         sonnet=$(read_provider_field "$cfg" "sonnet_model")
         opus=$(read_provider_field "$cfg" "opus_model")
         subagent=$(read_provider_field "$cfg" "subagent_model")
+
+        if [ -z "$auth_token" ]; then
+            print_error "Could not retrieve the API key for '$name'."
+            print_dim "Check 'auth_token_cmd' in $cfg"
+            exit 1
+        fi
 
         exec env \
             ANTHROPIC_BASE_URL="$base_url" \
@@ -577,9 +635,9 @@ cmd_launch() {
             ANTHROPIC_DEFAULT_HAIKU_MODEL="$haiku" \
             CLAUDE_CODE_SUBAGENT_MODEL="$subagent" \
             CLAUDE_CONFIG_DIR="$dir" \
-            claude
+            claude "$@"
     else
-        exec env CLAUDE_CONFIG_DIR="$dir" claude
+        exec env CLAUDE_CONFIG_DIR="$dir" claude "$@"
     fi
 }
 
@@ -608,9 +666,14 @@ cmd_config() {
         printf "  ${BOLD}Current configuration for '${CYAN}%s${RESET}${BOLD}'${RESET}\n\n" "$name"
         local cfg="$dir/$PROVIDER_CONFIG"
         printf "    ${DIM}Base URL:  %s${RESET}\n" "$(read_provider_field "$cfg" "base_url")"
-        local token
-        token=$(read_provider_field "$cfg" "auth_token")
-        printf "    ${DIM}API Key:   %s****${RESET}\n" "$(echo "$token" | head -c 12)"
+        local tok_cmd
+        tok_cmd=$(read_provider_field "$cfg" "auth_token_cmd")
+        if [ -n "$tok_cmd" ]; then
+            printf "    ${DIM}Key (via): %s${RESET}\n" "$tok_cmd"
+        else
+            printf "    ${DIM}API Key:   %s**** ${YELLOW}(legacy plaintext — reconfigure to secure it)${RESET}\n" \
+                "$(read_provider_field "$cfg" "auth_token" | head -c 12)"
+        fi
         printf "    ${DIM}Model:     %s${RESET}\n" "$(read_provider_field "$cfg" "model")"
         printf "    ${DIM}Opus:      %s${RESET}\n" "$(read_provider_field "$cfg" "opus_model")"
         printf "    ${DIM}Sonnet:    %s${RESET}\n" "$(read_provider_field "$cfg" "sonnet_model")"
@@ -627,15 +690,13 @@ cmd_config() {
 
     configure_third_party "$dir" "$name"
 
-    # Update alias in shell rc
+    # Refresh alias (delegates to claude-switch; no secret written to rc)
     if [ -f "$ZSHRC" ]; then
         sed -i "/^# Claude profile: ${name}/d" "$ZSHRC" 2>/dev/null || true
         sed -i "/^alias claude-${name}=/d" "$ZSHRC" 2>/dev/null || true
 
-        local env_prefix
-        env_prefix=$(build_env_prefix "$dir")
-        printf '\n# Claude profile: %s (third-party API)\nalias claude-%s='\''%sCLAUDE_CONFIG_DIR="%s" claude'\''\n' \
-            "$name" "$name" "$env_prefix" "$dir" >> "$ZSHRC"
+        printf "\n# Claude profile: %s\nalias claude-%s='claude-switch launch %s'\n" \
+            "$name" "$name" "$name" >> "$ZSHRC"
         echo ""
         print_success "Updated alias in ~/.bashrc"
         print_info "Run 'source ~/.bashrc' to refresh."
@@ -715,7 +776,7 @@ main() {
         *)
             # If arg matches a profile name, launch it directly
             if profile_exists "$1"; then
-                cmd_launch "$1"
+                cmd_launch "$@"
             else
                 print_error "Unknown command or profile: $1"
                 echo ""
