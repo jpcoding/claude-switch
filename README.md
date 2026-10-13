@@ -42,6 +42,7 @@ claude-switch version             # show version
 
 ```bash
 claude-switch create deepseek     # create + configure a DeepSeek API profile
+claude-switch create argo         # create an Argonne Argo gateway profile
 claude-switch create hs           # create + configure a Volcano Engine (Ark) profile
 claude-switch deepseek            # launch the deepseek profile
 claude-switch config deepseek     # change URL / key / models later
@@ -70,6 +71,32 @@ variables when launching:
 
 You can set one model for everything, or per-tier models (Haiku/Sonnet/Opus +
 subagent) for task routing. No OAuth login is needed — it works immediately.
+
+### Argo (Argonne) profiles (v2.5+)
+
+Choose **Argo** during `create` (or `config`) to use Claude through Argonne's
+Argo Gateway API. You're asked for your Argonne domain username (not your
+email), the base URL (default `https://apps.inside.anl.gov/argoapi`), an optional
+model to pin, and whether to turn off auto-updates. The profile's own
+`settings.json` is then written the way Argonne's setup guide describes:
+
+```json
+{
+  "apiKeyHelper": "echo <username>",
+  "cleanupPeriodDays": 3650000,
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://apps.inside.anl.gov/argoapi",
+    "CLAUDE_CODE_SKIP_ANTHROPIC_AUTH": "1",
+    "CLAUDE_CODE_AUTO_MODE_SERVER": "0",
+    "DISABLE_AUTOUPDATER": "1"
+  }
+}
+```
+
+All the Argo config is in that file, so you can use the same profile from VS
+Code or JetBrains by setting `CLAUDE_CONFIG_DIR=~/.claude-argo` in the IDE's
+environment. You need the Argonne network (VPN or onsite) for requests to
+go through.
 
 ### Where the API key is stored (v2.4+)
 

@@ -6,13 +6,14 @@ set -euo pipefail
 #                 With third-party API provider support. Pure bash.
 # ─────────────────────────────────────────────────────────────────────────────
 
-VERSION="2.4.0"
+VERSION="2.5.0"
 CLAUDE_HOME="$HOME/.claude"
 PROFILE_PREFIX="$HOME/.claude-"
 PROFILE_MARKER=".profile-name"
 PROVIDER_CONFIG=".provider.json"
 ZSHRC="$HOME/.bashrc"
 SHARED_ITEMS="skills CLAUDE.md plugins projects"
+ARGO_DEFAULT_URL="https://apps.inside.anl.gov/argoapi"
 
 # ── Colors & Icons ───────────────────────────────────────────────────────────
 
@@ -150,6 +151,18 @@ is_api_profile() {
     local dir
     dir="$(profile_dir "$1")"
     [ -f "$dir/$PROVIDER_CONFIG" ]
+}
+
+# provider_kind <dir> → "oauth", "argo", or "api" (generic third-party)
+provider_kind() {
+    local cfg="$1/$PROVIDER_CONFIG"
+    if [ ! -f "$cfg" ]; then
+        echo "oauth"
+    elif [ "$(read_provider_field "$cfg" "provider")" = "argo" ]; then
+        echo "argo"
+    else
+        echo "api"
+    fi
 }
 
 get_all_profiles() {
@@ -373,6 +386,100 @@ configure_third_party() {
     print_success "Third-party API configured"
 }
 
+# Argo (Argonne's internal LLM gateway). Unlike generic third-party profiles,
+# everything lives in the profile's own settings.json — apiKeyHelper + env —
+# exactly as Argonne's setup guide prescribes, so the same profile also works
+# from VS Code/JetBrains by pointing CLAUDE_CONFIG_DIR at it. The "key" is just
+# the Argonne domain username, so no secret backend is involved.
+configure_argo() {
+    local dir="$1" name="$2"
+
+    print_section "🏛  Argo Gateway (Argonne)" \
+        "Requires the Argonne network: VPN (remote) or onsite."
+
+    local username
+    ask_input "Argonne domain username (not your email)"
+    username="$INPUT_RESULT"
+    if [ -z "$username" ]; then
+        print_error "Username is required."
+        return 1
+    fi
+    # It ends up in a shell command (apiKeyHelper), so keep it strictly plain.
+    if ! [[ "$username" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        print_error "Use only your bare domain username: letters, digits, '.', '_', '-' (no quotes, no @)."
+        return 1
+    fi
+
+    local base_url
+    ask_input "Argo API Base URL" "$ARGO_DEFAULT_URL"
+    base_url="$INPUT_RESULT"
+
+    # Argo lags behind Anthropic's releases, so Claude Code's newest default
+    # model may not exist there yet — let the user pin one that does.
+    local model
+    ask_input "Pin a model (leave blank for Claude Code's default)"
+    model="$INPUT_RESULT"
+
+    local no_autoupdate=false
+    echo ""
+    if ask_confirm "Disable Claude Code auto-updates? (Argo recommends staying a few weeks behind)" "Y"; then
+        no_autoupdate=true
+    fi
+
+    {
+        printf '{\n'
+        printf '  "provider": "argo",\n'
+        printf '  "base_url": "%s",\n' "$(json_escape "$base_url")"
+        printf '  "username": "%s"\n'  "$(json_escape "$username")"
+        printf '}\n'
+    } > "$dir/$PROVIDER_CONFIG"
+    chmod 600 "$dir/$PROVIDER_CONFIG" 2>/dev/null || true
+
+    # Own settings.json (replaces any symlink to the shared one)
+    rm -f "$dir/settings.json" 2>/dev/null || true
+    {
+        printf '{\n'
+        printf '  "theme": "dark",\n'
+        [ -n "$model" ] && printf '  "model": "%s",\n' "$(json_escape "$model")"
+        printf '  "apiKeyHelper": "echo %s",\n' "$username"
+        printf '  "cleanupPeriodDays": 3650000,\n'
+        printf '  "env": {\n'
+        printf '    "ANTHROPIC_BASE_URL": "%s",\n' "$(json_escape "$base_url")"
+        printf '    "CLAUDE_CODE_SKIP_ANTHROPIC_AUTH": "1",\n'
+        if [ "$no_autoupdate" = true ]; then
+            printf '    "CLAUDE_CODE_AUTO_MODE_SERVER": "0",\n'
+            printf '    "DISABLE_AUTOUPDATER": "1"\n'
+        else
+            printf '    "CLAUDE_CODE_AUTO_MODE_SERVER": "0"\n'
+        fi
+        printf '  }\n'
+        printf '}\n'
+    } > "$dir/settings.json"
+
+    # Skip first-run onboarding, but never clobber an existing profile's state
+    [ -f "$dir/.claude.json" ] || printf '{\n  "hasCompletedOnboarding": true\n}\n' > "$dir/.claude.json"
+
+    echo ""
+    printf "    ${DIM}${IC_API} Base URL:  %s${RESET}\n" "$base_url"
+    printf "    ${DIM}${IC_API} Username:  %s${RESET}\n" "$username"
+    printf "    ${DIM}${IC_API} Model:     %s${RESET}\n" "${model:-(Claude Code default)}"
+    printf "    ${DIM}${IC_API} Updates:   %s${RESET}\n" "$([ "$no_autoupdate" = true ] && echo "auto-update off (run 'claude update' manually)" || echo "auto-update on")"
+    printf "    ${DIM}${IC_API} Settings:  %s${RESET}\n" "$dir/settings.json"
+    echo ""
+    print_success "Argo configured"
+}
+
+# configure_provider <dir> <name> → ask Argo vs. generic third-party, then configure
+configure_provider() {
+    ask_choose "Which API provider?" \
+        "Argo (Argonne National Laboratory gateway)" \
+        "Third-party API (DeepSeek, Volcano Engine, OpenRouter, etc.)"
+    case "$INPUT_RESULT" in
+        Argo*) configure_argo "$1" "$2" ;;
+        *)     configure_third_party "$1" "$2" ;;
+    esac
+}
+
 cmd_create() {
     local name="${1:-}"
     if [ -z "$name" ]; then
@@ -406,12 +513,14 @@ cmd_create() {
     # Ask about profile type
     ask_choose "What type of profile?" \
         "Anthropic (OAuth login)" \
+        "Argo (Argonne National Laboratory gateway)" \
         "Third-party API (DeepSeek, Volcano Engine, OpenRouter, etc.)"
     local profile_type="$INPUT_RESULT"
 
-    local is_third_party=false
+    local is_third_party=false is_argo=false
     case "$profile_type" in
         "Third-party"*) is_third_party=true ;;
+        Argo*)          is_third_party=true; is_argo=true ;;
     esac
 
     # Create profile
@@ -439,7 +548,9 @@ cmd_create() {
     print_success "Profile created at ~/.claude-$name/"
 
     # Configure provider if selected
-    if [ "$is_third_party" = true ]; then
+    if [ "$is_argo" = true ]; then
+        configure_argo "$dir" "$name"
+    elif [ "$is_third_party" = true ]; then
         configure_third_party "$dir" "$name"
     fi
 
@@ -468,7 +579,11 @@ cmd_create() {
     if [ "$is_third_party" = true ]; then
         printf "    source ~/.bashrc\n"
         printf "    ${CYAN}claude-%s${RESET}\n\n" "$name"
-        printf "    ${DIM}Third-party API configured — no OAuth login needed.${RESET}\n"
+        if [ "$is_argo" = true ]; then
+            printf "    ${DIM}Argo configured — connect to the Argonne VPN (or be onsite) first.${RESET}\n"
+        else
+            printf "    ${DIM}Third-party API configured — no OAuth login needed.${RESET}\n"
+        fi
     else
         printf "    source ~/.bashrc\n"
         printf "    ${CYAN}claude-switch %s${RESET}\n\n" "$name"
@@ -502,7 +617,10 @@ cmd_list() {
             dir="$(profile_dir "$name")"
 
             # Check if third-party API profile
-            if [ -f "$dir/$PROVIDER_CONFIG" ]; then
+            if [ "$(provider_kind "$dir")" = "argo" ]; then
+                printf "  ${IC_API}  ${BOLD}%-16s${RESET} ${DIM}%-24s${RESET} ${MAGENTA}${IC_CHECK} %s${RESET}\n" \
+                    "$name" "~/.claude-$name/" "Argo: $(read_provider_field "$dir/$PROVIDER_CONFIG" "username")"
+            elif [ -f "$dir/$PROVIDER_CONFIG" ]; then
                 local api_model
                 api_model=$(read_provider_field "$dir/$PROVIDER_CONFIG" "model")
                 provider_label="API: $api_model"
@@ -608,6 +726,12 @@ cmd_launch() {
     local dir
     dir="$(profile_dir "$name")"
 
+    # Argo: settings.json already carries apiKeyHelper + env. Drop shell-level
+    # Anthropic credentials, which would take precedence over apiKeyHelper.
+    if [ "$(provider_kind "$dir")" = "argo" ]; then
+        exec env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN CLAUDE_CONFIG_DIR="$dir" claude "$@"
+    fi
+
     # If third-party API profile, pass env vars
     if [ -f "$dir/$PROVIDER_CONFIG" ]; then
         local cfg="$dir/$PROVIDER_CONFIG"
@@ -661,7 +785,19 @@ cmd_config() {
     dir="$(profile_dir "$name")"
 
     # Show current config if exists
-    if [ -f "$dir/$PROVIDER_CONFIG" ]; then
+    if [ "$(provider_kind "$dir")" = "argo" ]; then
+        local cfg="$dir/$PROVIDER_CONFIG"
+        echo ""
+        printf "  ${BOLD}Current configuration for '${CYAN}%s${RESET}${BOLD}'${RESET} (Argo)\n\n" "$name"
+        printf "    ${DIM}Base URL:  %s${RESET}\n" "$(read_provider_field "$cfg" "base_url")"
+        printf "    ${DIM}Username:  %s${RESET}\n" "$(read_provider_field "$cfg" "username")"
+        echo ""
+        if ! ask_confirm "Reconfigure this profile?"; then
+            echo ""
+            print_info "Cancelled."
+            return
+        fi
+    elif [ -f "$dir/$PROVIDER_CONFIG" ]; then
         echo ""
         printf "  ${BOLD}Current configuration for '${CYAN}%s${RESET}${BOLD}'${RESET}\n\n" "$name"
         local cfg="$dir/$PROVIDER_CONFIG"
@@ -688,7 +824,7 @@ cmd_config() {
         fi
     fi
 
-    configure_third_party "$dir" "$name"
+    configure_provider "$dir" "$name"
 
     # Refresh alias (delegates to claude-switch; no secret written to rc)
     if [ -f "$ZSHRC" ]; then
@@ -740,6 +876,7 @@ cmd_help() {
     printf "    ${CYAN}version${RESET}               Show version\n\n"
     printf "  ${BOLD}EXAMPLES${RESET}\n"
     printf "    ${DIM}claude-switch create deepseek${RESET}    ${DIM}# create + configure DeepSeek API${RESET}\n"
+    printf "    ${DIM}claude-switch create argo${RESET}        ${DIM}# Argonne Argo gateway profile${RESET}\n"
     printf "    ${DIM}claude-switch deepseek${RESET}           ${DIM}# launch deepseek profile${RESET}\n"
     printf "    ${DIM}claude-switch list${RESET}               ${DIM}# show all profiles${RESET}\n"
     printf "    ${DIM}claude-switch${RESET}                    ${DIM}# interactive menu${RESET}\n\n"
@@ -752,6 +889,7 @@ cmd_help() {
     printf "    • Base URL, API Key, and Model names\n"
     printf "    • Per-tier models (Haiku/Sonnet/Opus) for task routing\n"
     printf "    • No OAuth login needed — works immediately\n"
+    printf "    Or choose \"Argo\" for Argonne's gateway (domain username as key).\n"
     echo ""
 }
 
