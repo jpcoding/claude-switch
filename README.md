@@ -76,19 +76,24 @@ subagent) for task routing. No OAuth login is needed — it works immediately.
 
 Choose **Argo** during `create` (or `config`) to use Claude through Argonne's
 Argo Gateway API. You're asked for your Argonne domain username (not your
-email), the base URL (default `https://apps.inside.anl.gov/argoapi`), an optional
-model to pin, and whether to turn off auto-updates. The profile's own
+email), the base URL (default `https://apps.inside.anl.gov/argoapi`), which model
+to use for each family (defaults: `claude-opus-5`, `claude-sonnet-5`,
+`claude-haiku-4-5`), and whether to turn off auto-updates. The profile's own
 `settings.json` is then written the way Argonne's setup guide describes:
 
 ```json
 {
+  "model": "claude-opus-5",
   "apiKeyHelper": "echo <username>",
   "cleanupPeriodDays": 3650000,
   "env": {
     "ANTHROPIC_BASE_URL": "https://apps.inside.anl.gov/argoapi",
     "CLAUDE_CODE_SKIP_ANTHROPIC_AUTH": "1",
-    "CLAUDE_CODE_AUTO_MODE_SERVER": "0",
-    "DISABLE_AUTOUPDATER": "1"
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-5",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-5",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-4-5",
+    "DISABLE_AUTOUPDATER": "1",
+    "CLAUDE_CODE_AUTO_MODE_SERVER": "0"
   }
 }
 ```
@@ -97,6 +102,17 @@ All the Argo config is in that file, so you can use the same profile from VS
 Code or JetBrains by setting `CLAUDE_CONFIG_DIR=~/.claude-argo` in the IDE's
 environment. You need the Argonne network (VPN or onsite) for requests to
 go through.
+
+Argo adds new Claude models later than Anthropic releases them, so the
+family mapping keeps Claude Code (including its background haiku calls) on
+models Argo serves. To see what's available:
+
+```bash
+curl -s https://apps.inside.anl.gov/argoapi/v1/models -H "x-api-key: <username>" -H "anthropic-version: 2023-06-01"
+```
+
+Argo lists display names ("Claude Opus 5"), but the standard IDs
+(`claude-opus-5`) work in requests.
 
 ### Where the API key is stored (v2.4+)
 

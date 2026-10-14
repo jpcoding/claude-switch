@@ -6,7 +6,7 @@ set -euo pipefail
 #                 With third-party API provider support. Pure bash.
 # ─────────────────────────────────────────────────────────────────────────────
 
-VERSION="2.5.0"
+VERSION="2.5.1"
 CLAUDE_HOME="$HOME/.claude"
 PROFILE_PREFIX="$HOME/.claude-"
 PROFILE_MARKER=".profile-name"
@@ -14,6 +14,10 @@ PROVIDER_CONFIG=".provider.json"
 ZSHRC="$HOME/.bashrc"
 SHARED_ITEMS="skills CLAUDE.md plugins projects"
 ARGO_DEFAULT_URL="https://apps.inside.anl.gov/argoapi"
+# Claude models Argo serves (checked 2026-10; its /v1/models lists what's current)
+ARGO_DEFAULT_OPUS="claude-opus-5"
+ARGO_DEFAULT_SONNET="claude-sonnet-5"
+ARGO_DEFAULT_HAIKU="claude-haiku-4-5"
 
 # ── Colors & Icons ───────────────────────────────────────────────────────────
 
@@ -69,7 +73,9 @@ ask_input() {
     local prompt="$1" default="${2:-}"
     if [ -n "$default" ]; then
         read -r -p "  $(printf "${CYAN}?${RESET} %s [${DIM}%s${RESET}]: " "$prompt" "$default")" INPUT_RESULT
-        [ -z "$INPUT_RESULT" ] && INPUT_RESULT="$default"
+        # `if`, not `&&`: a false test as the last command would return 1 and
+        # abort the caller under `set -e` whenever the user types an answer.
+        if [ -z "$INPUT_RESULT" ]; then INPUT_RESULT="$default"; fi
     else
         read -r -p "  $(printf "${CYAN}?${RESET} %s: " "$prompt")" INPUT_RESULT
     fi
@@ -414,11 +420,14 @@ configure_argo() {
     ask_input "Argo API Base URL" "$ARGO_DEFAULT_URL"
     base_url="$INPUT_RESULT"
 
-    # Argo lags behind Anthropic's releases, so Claude Code's newest default
-    # model may not exist there yet — let the user pin one that does.
-    local model
-    ask_input "Pin a model (leave blank for Claude Code's default)"
-    model="$INPUT_RESULT"
+    # Argo lags behind Anthropic's releases, so Claude Code's newest models may
+    # not exist there yet. Map each family (and the haiku used for background
+    # tasks) to one Argo serves; it accepts the standard Anthropic model IDs.
+    local opus sonnet haiku model
+    ask_input "Opus model"   "$ARGO_DEFAULT_OPUS";   opus="$INPUT_RESULT"
+    ask_input "Sonnet model" "$ARGO_DEFAULT_SONNET"; sonnet="$INPUT_RESULT"
+    ask_input "Haiku model"  "$ARGO_DEFAULT_HAIKU";  haiku="$INPUT_RESULT"
+    ask_input "Default model" "$opus";               model="$INPUT_RESULT"
 
     local no_autoupdate=false
     echo ""
@@ -440,18 +449,17 @@ configure_argo() {
     {
         printf '{\n'
         printf '  "theme": "dark",\n'
-        [ -n "$model" ] && printf '  "model": "%s",\n' "$(json_escape "$model")"
+        printf '  "model": "%s",\n' "$(json_escape "$model")"
         printf '  "apiKeyHelper": "echo %s",\n' "$username"
         printf '  "cleanupPeriodDays": 3650000,\n'
         printf '  "env": {\n'
         printf '    "ANTHROPIC_BASE_URL": "%s",\n' "$(json_escape "$base_url")"
         printf '    "CLAUDE_CODE_SKIP_ANTHROPIC_AUTH": "1",\n'
-        if [ "$no_autoupdate" = true ]; then
-            printf '    "CLAUDE_CODE_AUTO_MODE_SERVER": "0",\n'
-            printf '    "DISABLE_AUTOUPDATER": "1"\n'
-        else
-            printf '    "CLAUDE_CODE_AUTO_MODE_SERVER": "0"\n'
-        fi
+        printf '    "ANTHROPIC_DEFAULT_OPUS_MODEL": "%s",\n'   "$(json_escape "$opus")"
+        printf '    "ANTHROPIC_DEFAULT_SONNET_MODEL": "%s",\n' "$(json_escape "$sonnet")"
+        printf '    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "%s",\n'  "$(json_escape "$haiku")"
+        [ "$no_autoupdate" = true ] && printf '    "DISABLE_AUTOUPDATER": "1",\n'
+        printf '    "CLAUDE_CODE_AUTO_MODE_SERVER": "0"\n'
         printf '  }\n'
         printf '}\n'
     } > "$dir/settings.json"
@@ -462,7 +470,7 @@ configure_argo() {
     echo ""
     printf "    ${DIM}${IC_API} Base URL:  %s${RESET}\n" "$base_url"
     printf "    ${DIM}${IC_API} Username:  %s${RESET}\n" "$username"
-    printf "    ${DIM}${IC_API} Model:     %s${RESET}\n" "${model:-(Claude Code default)}"
+    printf "    ${DIM}${IC_API} Model:     %s${RESET}\n" "$model (opus: $opus, sonnet: $sonnet, haiku: $haiku)"
     printf "    ${DIM}${IC_API} Updates:   %s${RESET}\n" "$([ "$no_autoupdate" = true ] && echo "auto-update off (run 'claude update' manually)" || echo "auto-update on")"
     printf "    ${DIM}${IC_API} Settings:  %s${RESET}\n" "$dir/settings.json"
     echo ""
